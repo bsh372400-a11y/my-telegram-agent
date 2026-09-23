@@ -1,0 +1,5 @@
+pyTelegramBotAPI
+groq
+httpx
+beautifulsoup4
+flask
