@@ -64,16 +64,16 @@ def send_welcome(message):
 def handle_message(message):
     user_id = str(message.chat.id)
     user_message = message.text
-    
+
     history_file = f"history_{user_id}.json"
     if os.path.exists(history_file):
         with open(history_file, "r", encoding="utf-8") as f:
             messages = json.load(f)
     else:
         messages = [{"role": "system", "content": "أنت مساعد ذكي. استعمل search_web كي تحتاج معلومات حديثة."}]
-    
+
     messages.append({"role": "user", "content": user_message})
-    
+
     try:
         tools = [{
             "type": "function",
@@ -87,13 +87,13 @@ def handle_message(message):
                 }
             }
         }]
-        
+
         reply = client.chat.completions.create(
             messages=messages,
             model="openai/gpt-oss-120b",
             tools=tools,
         )
-        
+
         if reply.choices[0].message.tool_calls:
             tc = reply.choices[0].message.tool_calls[0]
             args = json.loads(tc.function.arguments)
@@ -102,15 +102,17 @@ def handle_message(message):
             messages.append(reply.choices[0].message)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
             reply = client.chat.completions.create(messages=messages, model="openai/gpt-oss-120b")
-        
+
         answer = reply.choices[0].message.content
-        bot.reply_to(message, answer)
-        
+
+        for i in range(0, len(answer), 4000):
+            bot.send_message(message.chat.id, answer[i:i+4000])
+
         messages.append({"role": "assistant", "content": answer})
-        
+
         with open(history_file, "w", encoding="utf-8") as f:
             json.dump(messages, f, ensure_ascii=False, indent=2)
-            
+
     except Exception as e:
         bot.reply_to(message, f"حدث خطأ: {e}")
 
@@ -118,6 +120,6 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    
+
     print("Bot running...")
     bot.infinity_polling()
