@@ -101,7 +101,7 @@ def handle_message(message):
             result = search_web(args["query"])
             messages.append(reply.choices[0].message)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-            reply = client.chat.completions.create(messages=messages, model="openai/gpt-oss-120b")
+            reply = client.chat.completions.create(messages=messages, model="openai/gpt-oss-120b", tools=tools)
 
         answer = reply.choices[0].message.content
 
