@@ -173,7 +173,7 @@ def handle_photo(m):
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                 ]
             }],
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="qwen/qwen3.6-27b",
         )
         send_long(m.chat.id, reply.choices[0].message.content)
     except Exception as e:
