@@ -62,8 +62,17 @@ def load_history(uid):
     return [{"role": "system", "content": "أنت مساعد ذكي ودود. تجاوب بالعربية. استعمل search_web كي تحتاج معلومات حديثة."}]
 
 def save_history(uid, msgs):
+    clean = []
+    for m in msgs:
+        if isinstance(m, dict):
+            clean.append(m)
+        else:
+            try:
+                clean.append(m.model_dump())
+            except:
+                pass
     with open(hfile(uid), "w", encoding="utf-8") as f:
-        json.dump(msgs, f, ensure_ascii=False, indent=2)
+        json.dump(clean, f, ensure_ascii=False, indent=2)
 
 # ============ إرسال الرسائل ============
 def send_long(chat_id, text):
@@ -85,6 +94,8 @@ def get_after_reply_buttons():
     return kb
 
 def send_answer(chat_id, text, with_buttons=True):
+    if not text:
+        text = "ما لقيتش جواب."
     parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
     for i, part in enumerate(parts):
         if i == len(parts) - 1 and with_buttons:
@@ -106,7 +117,7 @@ def get_main_menu():
         types.InlineKeyboardButton("💬 شات", callback_data="menu_chat"),
     )
     kb.add(
-        types.InlineKeyboardButton("🎲 نصيحة عشوائية", callback_data="menu_quote"),
+        types.InlineKeyboardButton("🎲 نصيحة", callback_data="menu_quote"),
         types.InlineKeyboardButton("🌤️ الطقس", callback_data="menu_weather"),
         types.InlineKeyboardButton("📊 إحصائيات", callback_data="menu_stats"),
         types.InlineKeyboardButton("❓ مساعدة", callback_data="menu_help"),
@@ -163,7 +174,7 @@ def chat_with_tools(uid, user_text, with_history=True):
         args = json.loads(tc.function.arguments)
         bot.send_message(uid, f"🔍 نبحث على: {args['query']}")
         res = search_web(args["query"])
-        msgs.append(reply.choices[0].message)
+        msgs.append(reply.choices[0].message.model_dump())
         msgs.append({"role": "tool", "tool_call_id": tc.id, "content": res})
         reply = client.chat.completions.create(messages=msgs, model="openai/gpt-oss-120b", tools=TOOLS)
 
@@ -192,20 +203,20 @@ def cmd_start(m):
 
 @bot.message_handler(commands=['help'])
 def cmd_help(m):
-    txt = ("🤖 **الأوامر:**\n"
+    txt = ("🤖 الأوامر:\n"
            "/start - بداية\n"
            "/menu - القائمة التفاعلية\n"
            "/help - المساعدة\n"
            "/clear - امسح الذاكرة\n"
            "/stats - إحصائيات\n\n"
-           "📝 **المميزات:**\n"
+           "📝 المميزات:\n"
            "• كتابة عادية\n"
            "• Voice → نص\n"
            "• صورة → وصف\n"
            "• PDF → تلخيص\n"
            "• بحث تلقائي\n"
            "• أزرار تفاعلية")
-    bot.reply_to(m, txt, parse_mode="Markdown")
+    bot.reply_to(m, txt)
 
 @bot.message_handler(commands=['menu'])
 def cmd_menu(m):
@@ -225,15 +236,15 @@ def cmd_stats(m):
         with open(hfile(uid), "r", encoding="utf-8") as f:
             msgs = json.load(f)
         total = len(msgs)
-        user_msgs = sum(1 for x in msgs if x.get("role") == "user")
-        bot_msgs = sum(1 for x in msgs if x.get("role") == "assistant")
-        txt = (f"📊 **إحصائياتك:**\n\n"
+        user_msgs = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "user")
+        bot_msgs = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "assistant")
+        txt = (f"📊 إحصائياتك:\n\n"
                f"💬 مجموع الرسائل: {total}\n"
                f"👤 رسائلك: {user_msgs}\n"
                f"🤖 ردود البوت: {bot_msgs}")
     else:
         txt = "📊 ما عندك حتى محادثة محفوظة."
-    bot.reply_to(m, txt, parse_mode="Markdown")
+    bot.reply_to(m, txt)
 
 # ============ معالجة الأزرار ============
 @bot.callback_query_handler(func=lambda call: True)
@@ -341,7 +352,7 @@ def process_summary(m):
 def process_ideas(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"عطيني 5 أفكار على: {m.text}")
+        answer = chat_with_tools(m.chat.id, f"عطيني 5 أفكار على: {m.text}", with_history=False)
         send_answer(m.chat.id, answer)
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
@@ -349,7 +360,7 @@ def process_ideas(m):
 def process_write(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"اكتبلي: {m.text}")
+        answer = chat_with_tools(m.chat.id, f"اكتبلي: {m.text}", with_history=False)
         send_answer(m.chat.id, answer)
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
@@ -365,7 +376,7 @@ def process_math(m):
 def process_explain(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"اشرحلي بطريقة بسيطة: {m.text}")
+        answer = chat_with_tools(m.chat.id, f"اشرحلي بطريقة بسيطة: {m.text}", with_history=False)
         send_answer(m.chat.id, answer)
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
@@ -373,7 +384,7 @@ def process_explain(m):
 def process_weather(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"شنوّة الطقس في {m.text} توّا؟ ابحثلي.", with_history=False)
+        answer = chat_with_tools(m.chat.id, f"شنوّة الطقس في {m.text} توّا؟ ابحثلي في الإنترنت.", with_history=False)
         send_answer(m.chat.id, answer)
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
