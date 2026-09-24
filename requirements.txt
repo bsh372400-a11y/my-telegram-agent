@@ -6,3 +6,4 @@ flask
 pypdf
 google-genai
 Pillow
+openai
