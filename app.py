@@ -1,5 +1,7 @@
 import os
+import io
 import json
+import base64
 import threading
 from flask import Flask
 from groq import Groq
@@ -7,6 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import telebot
+from pypdf import PdfReader
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -17,7 +20,6 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
-
 app = Flask(__name__)
 
 @app.route('/')
@@ -32,94 +34,192 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
+def hfile(uid):
+    return f"history_{uid}.json"
+
+def load_history(uid):
+    f = hfile(uid)
+    if os.path.exists(f):
+        try:
+            with open(f, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except:
+            pass
+    return [{"role": "system", "content": "أنت مساعد ذكي ودود. تجاوب بالعربية. استعمل search_web كي تحتاج معلومات حديثة."}]
+
+def save_history(uid, msgs):
+    with open(hfile(uid), "w", encoding="utf-8") as f:
+        json.dump(msgs, f, ensure_ascii=False, indent=2)
+
+def send_long(chat_id, text):
+    for i in range(0, len(text), 4000):
+        bot.send_message(chat_id, text[i:i+4000])
+
 def search_web(query):
     try:
-        url = "https://html.duckduckgo.com/html/"
-        data = {"q": query}
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = httpx.post(url, data=data, headers=headers, timeout=20)
-        soup = BeautifulSoup(response.text, "html.parser")
-        results = []
+        r = httpx.post("https://html.duckduckgo.com/html/", data={"q": query},
+                       headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        soup = BeautifulSoup(r.text, "html.parser")
+        out = []
         for res in soup.select(".result__body")[:3]:
-            title_tag = res.select_one(".result__title .result__a")
-            snippet_tag = res.select_one(".result__snippet")
-            if title_tag:
-                title = title_tag.get_text(strip=True)
-                raw_link = title_tag.get("href", "")
-                if "uddg=" in raw_link:
-                    link = unquote(raw_link.split("uddg=")[1].split("&")[0])
-                else:
-                    link = raw_link
-                snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
-                results.append(f"- {title}: {snippet} ({link})")
-        return "\n".join(results) if results else "لا توجد نتائج."
+            t = res.select_one(".result__title .result__a")
+            s = res.select_one(".result__snippet")
+            if t:
+                title = t.get_text(strip=True)
+                link = t.get("href", "")
+                if "uddg=" in link:
+                    link = unquote(link.split("uddg=")[1].split("&")[0])
+                snip = s.get_text(strip=True) if s else ""
+                out.append(f"- {title}: {snip} ({link})")
+        return "\n".join(out) if out else "لا توجد نتائج."
     except Exception as e:
         return f"خطأ: {e}"
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "أهلاً! أنا مساعدك الذكي. كيف يمكنني مساعدتك؟")
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "search_web",
+        "description": "ابحث في الإنترنت للحصول على معلومات حديثة",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        }
+    }
+}]
 
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    user_id = str(message.chat.id)
-    user_message = message.text
-
-    history_file = f"history_{user_id}.json"
-    if os.path.exists(history_file):
-        with open(history_file, "r", encoding="utf-8") as f:
-            messages = json.load(f)
+def chat_with_tools(uid, user_text, with_history=True):
+    if with_history:
+        msgs = load_history(uid)
     else:
-        messages = [{"role": "system", "content": "أنت مساعد ذكي. استعمل search_web كي تحتاج معلومات حديثة."}]
+        msgs = [{"role": "system", "content": "أنت مساعد ذكي ودود. تجاوب بالعربية."}]
+    msgs.append({"role": "user", "content": user_text})
 
-    messages.append({"role": "user", "content": user_message})
+    reply = client.chat.completions.create(messages=msgs, model="openai/gpt-oss-120b", tools=TOOLS)
 
+    if reply.choices[0].message.tool_calls:
+        tc = reply.choices[0].message.tool_calls[0]
+        args = json.loads(tc.function.arguments)
+        bot.send_message(uid, f"🔍 نبحث على: {args['query']}")
+        res = search_web(args["query"])
+        msgs.append(reply.choices[0].message)
+        msgs.append({"role": "tool", "tool_call_id": tc.id, "content": res})
+        reply = client.chat.completions.create(messages=msgs, model="openai/gpt-oss-120b", tools=TOOLS)
+
+    answer = reply.choices[0].message.content
+    if with_history:
+        msgs.append({"role": "assistant", "content": answer})
+        save_history(uid, msgs)
+    return answer
+
+def transcribe(audio_bytes):
+    r = client.audio.transcriptions.create(
+        file=("voice.ogg", audio_bytes),
+        model="whisper-large-v3-turbo",
+    )
+    return r.text
+
+@bot.message_handler(commands=['start'])
+def cmd_start(m):
+    bot.reply_to(m, "أهلاً! 👋\n\nأنا مساعدك الذكي. نجم:\n💬 تجاوب معايا بالكتابة\n🎤 تبعثلي voice\n🖼️ تبعثلي صورة\n📄 تبعثلي PDF\n🔍 نبحثلك في الإنترنت\n\nأكتب /help للتفاصيل.")
+
+@bot.message_handler(commands=['help'])
+def cmd_help(m):
+    txt = ("🤖 الأوامر:\n"
+           "/start - بداية\n"
+           "/help - المساعدة\n"
+           "/clear - امسح الذاكرة\n\n"
+           "📝 المميزات:\n"
+           "• كتابة عادية\n"
+           "• Voice message (نحوّلو لنص)\n"
+           "• صورة (نوصفلك فيها)\n"
+           "• PDF (نقراه ونجاوبك)\n"
+           "• بحث في الإنترنت تلقائي")
+    bot.reply_to(m, txt)
+
+@bot.message_handler(commands=['clear'])
+def cmd_clear(m):
+    uid = m.chat.id
+    if os.path.exists(hfile(uid)):
+        os.remove(hfile(uid))
+    bot.reply_to(m, "✅ الذاكرة تمسحت.")
+
+@bot.message_handler(content_types=['voice'])
+def handle_voice(m):
     try:
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "search_web",
-                "description": "ابحث في الإنترنت للحصول على معلومات حديثة",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}},
-                    "required": ["query"]
-                }
-            }
-        }]
-
-        reply = client.chat.completions.create(
-            messages=messages,
-            model="openai/gpt-oss-120b",
-            tools=tools,
-        )
-
-        if reply.choices[0].message.tool_calls:
-            tc = reply.choices[0].message.tool_calls[0]
-            args = json.loads(tc.function.arguments)
-            bot.send_message(message.chat.id, f"🔍 نبحث على: {args['query']}")
-            result = search_web(args["query"])
-            messages.append(reply.choices[0].message)
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-            reply = client.chat.completions.create(messages=messages, model="openai/gpt-oss-120b", tools=tools)
-
-        answer = reply.choices[0].message.content
-
-        for i in range(0, len(answer), 4000):
-            bot.send_message(message.chat.id, answer[i:i+4000])
-
-        messages.append({"role": "assistant", "content": answer})
-
-        with open(history_file, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
-
+        bot.send_chat_action(m.chat.id, 'typing')
+        fi = bot.get_file(m.voice.file_id)
+        audio = bot.download_file(fi.file_path)
+        text = transcribe(audio)
+        bot.send_message(m.chat.id, f"🎤 سمعتك تقول: {text}")
+        answer = chat_with_tools(m.chat.id, text)
+        send_long(m.chat.id, answer)
     except Exception as e:
-        bot.reply_to(message, f"حدث خطأ: {e}")
+        bot.reply_to(m, f"خطأ في الصوت: {e}")
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(m):
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        fi = bot.get_file(m.photo[-1].file_id)
+        img = bot.download_file(fi.file_path)
+        b64 = base64.b64encode(img).decode()
+        caption = m.caption or "شنوّة في هذه الصورة؟ وصفلي بالتفصيل."
+        reply = client.chat.completions.create(
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": caption},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]
+            }],
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+        )
+        send_long(m.chat.id, reply.choices[0].message.content)
+    except Exception as e:
+        bot.reply_to(m, f"خطأ في الصورة: {e}")
+
+@bot.message_handler(content_types=['document'])
+def handle_doc(m):
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        fi = bot.get_file(m.document.file_id)
+        doc = bot.download_file(fi.file_path)
+        name = (m.document.file_name or "").lower()
+
+        if name.endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(doc))
+            text = "\n".join((p.extract_text() or "") for p in reader.pages[:20])
+            if not text.strip():
+                bot.reply_to(m, "ما قدرتش نقرا الـ PDF.")
+                return
+            prompt = f"هذا محتوى PDF، لخّصلي أهم النقاط:\n\n{text[:8000]}"
+        elif name.endswith((".txt", ".md", ".csv")):
+            text = doc.decode("utf-8", errors="ignore")
+            prompt = f"هذا محتوى ملف، لخّصلي:\n\n{text[:8000]}"
+        else:
+            bot.reply_to(m, "نوع الملف ما مدعومش. ابعثلي PDF ولا ملف نصي.")
+            return
+
+        answer = chat_with_tools(m.chat.id, prompt, with_history=False)
+        send_long(m.chat.id, answer)
+    except Exception as e:
+        bot.reply_to(m, f"خطأ في الملف: {e}")
+
+@bot.message_handler(func=lambda m: True)
+def handle_text(m):
+    if not m.text:
+        return
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        answer = chat_with_tools(m.chat.id, m.text)
+        send_long(m.chat.id, answer)
+    except Exception as e:
+        bot.reply_to(m, f"حدث خطأ: {e}")
 
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
     print("Bot running...")
     bot.infinity_polling()
