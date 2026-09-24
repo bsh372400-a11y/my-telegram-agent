@@ -163,7 +163,7 @@ def handle_voice(m):
         answer = chat_with_tools(m.chat.id, text)
         send_long(m.chat.id, answer)
     except Exception as e:
-        bot.reply_to(m, f"خطأ في الصوت: {e}")
+        bot.reply_to(m, f"خطأ في الصوت: {str(e)[:200]}")
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
@@ -176,16 +176,29 @@ def handle_photo(m):
         img = bot.download_file(fi.file_path)
         caption = m.caption or "شنوّة في هذه الصورة؟ وصفلي بالتفصيل."
 
-        response = gemini_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=[
-                types.Part.from_text(text=caption),
-                types.Part.from_bytes(data=img, mime_type="image/jpeg")
-            ]
-        )
-        send_long(m.chat.id, response.text)
+        import time
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = gemini_client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[
+                        types.Part.from_text(text=caption),
+                        types.Part.from_bytes(data=img, mime_type="image/jpeg")
+                    ]
+                )
+                send_long(m.chat.id, response.text)
+                return
+            except Exception as e:
+                last_error = e
+                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                    time.sleep(3)
+                    continue
+                else:
+                    break
+        bot.reply_to(m, f"الصورة ما خدمتش توّا. عاود جرّب بعد شوية.\n\n({str(last_error)[:200]})")
     except Exception as e:
-        bot.reply_to(m, f"خطأ في الصورة: {e}")
+        bot.reply_to(m, f"خطأ في الصورة: {str(e)[:200]}")
 
 @bot.message_handler(content_types=['document'])
 def handle_doc(m):
@@ -212,7 +225,7 @@ def handle_doc(m):
         answer = chat_with_tools(m.chat.id, prompt, with_history=False)
         send_long(m.chat.id, answer)
     except Exception as e:
-        bot.reply_to(m, f"خطأ في الملف: {e}")
+        bot.reply_to(m, f"خطأ في الملف: {str(e)[:200]}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_text(m):
@@ -223,7 +236,7 @@ def handle_text(m):
         answer = chat_with_tools(m.chat.id, m.text)
         send_long(m.chat.id, answer)
     except Exception as e:
-        bot.reply_to(m, f"حدث خطأ: {e}")
+        bot.reply_to(m, f"حدث خطأ: {str(e)[:200]}")
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
