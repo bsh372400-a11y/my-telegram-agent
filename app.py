@@ -10,9 +10,12 @@ from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import telebot
 from pypdf import PdfReader
+from google import genai
+from google.genai import types
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     print("Error: missing tokens")
@@ -20,6 +23,11 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
+
+gemini_client = None
+if GEMINI_API_KEY:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
 app = Flask(__name__)
 
 @app.route('/')
@@ -159,23 +167,23 @@ def handle_voice(m):
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
+    if not gemini_client:
+        bot.reply_to(m, "ميزة الصور غير مفعلة.")
+        return
     try:
         bot.send_chat_action(m.chat.id, 'typing')
         fi = bot.get_file(m.photo[-1].file_id)
         img = bot.download_file(fi.file_path)
-        b64 = base64.b64encode(img).decode()
         caption = m.caption or "شنوّة في هذه الصورة؟ وصفلي بالتفصيل."
-        reply = client.chat.completions.create(
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": caption},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]
-            }],
-            model="qwen/qwen3.6-27b",
+
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_text(text=caption),
+                types.Part.from_bytes(data=img, mime_type="image/jpeg")
+            ]
         )
-        send_long(m.chat.id, reply.choices[0].message.content)
+        send_long(m.chat.id, response.text)
     except Exception as e:
         bot.reply_to(m, f"خطأ في الصورة: {e}")
 
@@ -198,7 +206,7 @@ def handle_doc(m):
             text = doc.decode("utf-8", errors="ignore")
             prompt = f"هذا محتوى ملف، لخّصلي:\n\n{text[:8000]}"
         else:
-            bot.reply_to(m, "نوع الملف ما مدعومش. ابعثلي PDF ولا ملف نصي.")
+            bot.reply_to(m, "نوع الملف ما مدعومش.")
             return
 
         answer = chat_with_tools(m.chat.id, prompt, with_history=False)
