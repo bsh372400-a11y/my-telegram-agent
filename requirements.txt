@@ -4,3 +4,5 @@ httpx
 beautifulsoup4
 flask
 pypdf
+google-genai
+Pillow
