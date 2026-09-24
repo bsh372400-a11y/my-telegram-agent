@@ -10,12 +10,11 @@ from bs4 import BeautifulSoup
 from urllib.parse import unquote
 import telebot
 from pypdf import PdfReader
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     print("Error: missing tokens")
@@ -24,9 +23,12 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Groq(api_key=GROQ_API_KEY)
 
-gemini_client = None
-if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+openrouter_client = None
+if OPENROUTER_API_KEY:
+    openrouter_client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
 
 app = Flask(__name__)
 
@@ -167,36 +169,27 @@ def handle_voice(m):
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(m):
-    if not gemini_client:
+    if not openrouter_client:
         bot.reply_to(m, "ميزة الصور غير مفعلة.")
         return
     try:
         bot.send_chat_action(m.chat.id, 'typing')
         fi = bot.get_file(m.photo[-1].file_id)
         img = bot.download_file(fi.file_path)
+        b64 = base64.b64encode(img).decode()
         caption = m.caption or "شنوّة في هذه الصورة؟ وصفلي بالتفصيل."
 
-        import time
-        last_error = None
-        for attempt in range(3):
-            try:
-                response = gemini_client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=[
-                        types.Part.from_text(text=caption),
-                        types.Part.from_bytes(data=img, mime_type="image/jpeg")
-                    ]
-                )
-                send_long(m.chat.id, response.text)
-                return
-            except Exception as e:
-                last_error = e
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(3)
-                    continue
-                else:
-                    break
-        bot.reply_to(m, f"الصورة ما خدمتش توّا. عاود جرّب بعد شوية.\n\n({str(last_error)[:200]})")
+        response = openrouter_client.chat.completions.create(
+            model="openrouter/free",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": caption},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]
+            }]
+        )
+        send_long(m.chat.id, response.choices[0].message.content)
     except Exception as e:
         bot.reply_to(m, f"خطأ في الصورة: {str(e)[:200]}")
 
