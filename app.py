@@ -46,12 +46,11 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# ============ الذاكرة (مع تنظيف) ============
+# ============ الذاكرة ============
 def hfile(uid):
     return f"history_{uid}.json"
 
 def clean_msg(m):
-    """نخليو غير الحقول المسموحة"""
     if not isinstance(m, dict):
         return None
     role = m.get("role")
@@ -64,7 +63,6 @@ def clean_msg(m):
         out["tool_calls"] = m["tool_calls"]
     if "tool_call_id" in m:
         out["tool_call_id"] = m["tool_call_id"]
-    # نحيّدو أي حاجة أخرى (annotations...)
     return out
 
 def load_history(uid):
@@ -216,11 +214,13 @@ def chat_with_tools(uid, user_text, with_history=True):
         msgs.append({"role": "tool", "tool_call_id": tc.id, "content": res})
 
         try:
+            summary_msgs = [
+                {"role": "system", "content": "أنت مساعد ذكي. جاوب على سؤال المستخدم بناء على نتائج البحث. جاوب بالعربية، بشكل واضح ومفيد."},
+                {"role": "user", "content": f"السؤال: {user_text}\n\nنتائج البحث:\n{res}\n\nجاوب على السؤال بناء على هالنتائج."}
+            ]
             reply2 = client.chat.completions.create(
-                messages=msgs,
-                model="openai/gpt-oss-120b",
-                tools=TOOLS,
-                tool_choice="none"
+                messages=summary_msgs,
+                model="openai/gpt-oss-120b"
             )
             answer = reply2.choices[0].message.content
         except Exception as e:
