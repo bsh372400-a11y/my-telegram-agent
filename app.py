@@ -46,16 +46,40 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# ============ الذاكرة ============
+# ============ الذاكرة (مع تنظيف) ============
 def hfile(uid):
     return f"history_{uid}.json"
+
+def clean_msg(m):
+    """نخليو غير الحقول المسموحة"""
+    if not isinstance(m, dict):
+        return None
+    role = m.get("role")
+    if role not in ("system", "user", "assistant", "tool"):
+        return None
+    out = {"role": role}
+    if "content" in m and m["content"] is not None:
+        out["content"] = m["content"]
+    if "tool_calls" in m and m["tool_calls"]:
+        out["tool_calls"] = m["tool_calls"]
+    if "tool_call_id" in m:
+        out["tool_call_id"] = m["tool_call_id"]
+    # نحيّدو أي حاجة أخرى (annotations...)
+    return out
 
 def load_history(uid):
     f = hfile(uid)
     if os.path.exists(f):
         try:
             with open(f, "r", encoding="utf-8") as fp:
-                return json.load(fp)
+                raw = json.load(fp)
+            cleaned = []
+            for m in raw:
+                c = clean_msg(m)
+                if c:
+                    cleaned.append(c)
+            if cleaned:
+                return cleaned
         except:
             pass
     return [{"role": "system", "content": "أنت مساعد ذكي ودود. تجاوب بالعربية. استعمل search_web كي تحتاج معلومات حديثة."}]
@@ -63,22 +87,13 @@ def load_history(uid):
 def save_history(uid, msgs):
     clean = []
     for m in msgs:
-        if isinstance(m, dict):
-            clean.append(m)
-        else:
-            try:
-                clean.append(m.model_dump())
-            except:
-                pass
+        c = clean_msg(m)
+        if c:
+            clean.append(c)
     with open(hfile(uid), "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
-# ============ إرسال الرسائل ============
-def send_long(chat_id, text):
-    parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-    for part in parts:
-        bot.send_message(chat_id, part)
-
+# ============ الأزرار ============
 def get_after_reply_buttons():
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
@@ -93,8 +108,8 @@ def get_after_reply_buttons():
     return kb
 
 def send_answer(chat_id, text, with_buttons=True):
-    if not text:
-        text = "ما لقيتش جواب."
+    if not text or not text.strip():
+        text = "ما لقيتش جواب. عاود جرّب."
     parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
     for i, part in enumerate(parts):
         if i == len(parts) - 1 and with_buttons:
@@ -102,7 +117,6 @@ def send_answer(chat_id, text, with_buttons=True):
         else:
             bot.send_message(chat_id, part)
 
-# ============ القوائم ============
 def get_main_menu():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -166,17 +180,30 @@ def chat_with_tools(uid, user_text, with_history=True):
         msgs = [{"role": "system", "content": "أنت مساعد ذكي ودود. تجاوب بالعربية."}]
     msgs.append({"role": "user", "content": user_text})
 
-    reply = client.chat.completions.create(messages=msgs, model="openai/gpt-oss-120b", tools=TOOLS)
+    try:
+        reply = client.chat.completions.create(
+            messages=msgs,
+            model="openai/gpt-oss-120b",
+            tools=TOOLS,
+            tool_choice="auto"
+        )
+        msg = reply.choices[0].message
+    except Exception as e:
+        return f"خطأ في الاتصال: {str(e)[:200]}"
 
-    if reply.choices[0].message.tool_calls:
-        tc = reply.choices[0].message.tool_calls[0]
-        args = json.loads(tc.function.arguments)
-        bot.send_message(uid, f"🔍 نبحث على: {args['query']}")
-        res = search_web(args["query"])
-        
-        clean_tc = {
+    if msg.tool_calls:
+        tc = msg.tool_calls[0]
+        try:
+            args = json.loads(tc.function.arguments)
+        except:
+            args = {}
+        query = args.get("query", user_text)
+        bot.send_message(uid, f"🔍 نبحث على: {query}")
+        res = search_web(query)
+
+        msgs.append({
             "role": "assistant",
-            "content": reply.choices[0].message.content or "",
+            "content": msg.content or "",
             "tool_calls": [{
                 "id": tc.id,
                 "type": "function",
@@ -185,15 +212,29 @@ def chat_with_tools(uid, user_text, with_history=True):
                     "arguments": tc.function.arguments
                 }
             }]
-        }
-        msgs.append(clean_tc)
+        })
         msgs.append({"role": "tool", "tool_call_id": tc.id, "content": res})
-        reply = client.chat.completions.create(messages=msgs, model="openai/gpt-oss-120b", tools=TOOLS)
 
-    answer = reply.choices[0].message.content
+        try:
+            reply2 = client.chat.completions.create(
+                messages=msgs,
+                model="openai/gpt-oss-120b",
+                tools=TOOLS,
+                tool_choice="none"
+            )
+            answer = reply2.choices[0].message.content
+        except Exception as e:
+            answer = f"لقيت النتائج بصح ما قدرتش نلخّصها. عاود جرّب. ({str(e)[:100]})"
+    else:
+        answer = msg.content
+
+    if not answer or not answer.strip():
+        answer = "ما لقيتش جواب. عاود جرّب."
+
     if with_history:
         msgs.append({"role": "assistant", "content": answer})
         save_history(uid, msgs)
+
     return answer
 
 def transcribe(audio_bytes):
@@ -203,31 +244,23 @@ def transcribe(audio_bytes):
     )
     return r.text
 
-# ============ الأوامر الأساسية ============
+# ============ الأوامر ============
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
-    txt = ("أهلاً! 👋\n\nأنا مساعدك الذكي، فيه بزاف مميزات:\n"
+    txt = ("أهلاً! 👋\n\nأنا مساعدك الذكي:\n"
            "💬 كتابة | 🎤 صوت | 🖼️ صور | 📄 PDF\n"
-           "🔍 بحث | 🌐 ترجمة | 📝 تلخيص | 💡 أفكار\n"
-           "🔢 حساب | 📖 شرح | 🎲 نصيحة | 🌤️ طقس\n\n"
-           "دوس على /menu باش تشوف كل شيء!")
+           "🔍 بحث | 🌐 ترجمة | 📝 تلخيص | 💡 أفكار\n\n"
+           "اكتب /menu باش تشوف كل شيء!")
     bot.reply_to(m, txt, reply_markup=get_main_menu())
 
 @bot.message_handler(commands=['help'])
 def cmd_help(m):
     txt = ("🤖 الأوامر:\n"
            "/start - بداية\n"
-           "/menu - القائمة التفاعلية\n"
+           "/menu - القائمة\n"
            "/help - المساعدة\n"
            "/clear - امسح الذاكرة\n"
-           "/stats - إحصائيات\n\n"
-           "📝 المميزات:\n"
-           "• كتابة عادية\n"
-           "• Voice → نص\n"
-           "• صورة → وصف\n"
-           "• PDF → تلخيص\n"
-           "• بحث تلقائي\n"
-           "• أزرار تفاعلية")
+           "/stats - إحصائيات")
     bot.reply_to(m, txt)
 
 @bot.message_handler(commands=['menu'])
@@ -258,7 +291,7 @@ def cmd_stats(m):
         txt = "📊 ما عندك حتى محادثة محفوظة."
     bot.reply_to(m, txt)
 
-# ============ معالجة الأزرار ============
+# ============ الأزرار ============
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     uid = call.message.chat.id
