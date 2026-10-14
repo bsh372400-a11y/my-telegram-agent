@@ -297,6 +297,13 @@ def chat_with_tools(uid, user_text, with_history=True):
 
     if msg.tool_calls:
         tc = msg.tool_calls[0]
+        # حماية: إذا الأداة ماهيش search_web، تجاهلها
+        if tc.function.name != "search_web":
+            answer = msg.content or "سمعتك، بصح ما فهمتش. عاود صياغة."
+            if with_history:
+                msgs.append({"role": "assistant", "content": answer})
+                save_history(uid, msgs)
+            return answer
         try:
             args = json.loads(tc.function.arguments)
         except:
