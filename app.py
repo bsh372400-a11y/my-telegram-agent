@@ -4,6 +4,7 @@ import json
 import base64
 import threading
 import random
+import time
 from flask import Flask
 from groq import Groq
 import httpx
@@ -17,6 +18,8 @@ from openai import OpenAI
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+AGNES_API_KEY = os.environ.get("AGNES_API_KEY")
+MAGIC_HOUR_API_KEY = os.environ.get("MAGIC_HOUR_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     print("Error: missing tokens")
@@ -91,6 +94,108 @@ def save_history(uid, msgs):
     with open(hfile(uid), "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
+# ============ توليد الفيديو ============
+def generate_video_agnes(prompt, seconds=5):
+    if not AGNES_API_KEY:
+        return None, "Agnes API key missing"
+    try:
+        create_url = "https://apihub.agnes-ai.com/v1/videos"
+        headers = {
+            "Authorization": f"Bearer {AGNES_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "agnes-video-2.5",
+            "prompt": prompt,
+            "seconds": str(seconds),
+            "mode": "text",
+            "size": "720P",
+            "aspect_ratio": "16:9"
+        }
+        r = httpx.post(create_url, json=payload, headers=headers, timeout=60)
+        if r.status_code != 200:
+            return None, f"Agnes create: {r.text[:150]}"
+        data = r.json()
+        vid = data.get("video_id")
+        if not vid:
+            return None, f"Agnes no id: {str(data)[:150]}"
+
+        poll = f"https://apihub.agnes-ai.com/agnesapi?video_id={vid}&model_name=agnes-video-2.5"
+        for _ in range(60):
+            time.sleep(3)
+            try:
+                rr = httpx.get(poll, headers={"Authorization": f"Bearer {AGNES_API_KEY}"}, timeout=30)
+                if rr.status_code != 200:
+                    continue
+                d = rr.json()
+                st = d.get("status")
+                if st == "completed":
+                    return d.get("url"), None
+                if st == "failed":
+                    return None, f"Agnes failed: {d.get('error', 'unknown')}"
+            except:
+                continue
+        return None, "Agnes timeout"
+    except Exception as e:
+        return None, f"Agnes: {str(e)[:150]}"
+
+def generate_video_magic(prompt, seconds=5):
+    if not MAGIC_HOUR_API_KEY:
+        return None, "Magic Hour key missing"
+    try:
+        url = "https://api.magichour.ai/v1/text-to-video"
+        headers = {
+            "Authorization": f"Bearer {MAGIC_HOUR_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        payload = {
+            "name": "Telegram Bot",
+            "end_seconds": seconds,
+            "aspect_ratio": "16:9",
+            "resolution": "720p",
+            "style": {"prompt": prompt}
+        }
+        r = httpx.post(url, json=payload, headers=headers, timeout=60)
+        if r.status_code != 200:
+            return None, f"MagicHour create: {r.text[:150]}"
+        data = r.json()
+        job = data.get("id")
+        if not job:
+            return None, f"MagicHour no id: {str(data)[:150]}"
+
+        poll = f"https://api.magichour.ai/v1/video-projects/{job}"
+        for _ in range(80):
+            time.sleep(3)
+            try:
+                rr = httpx.get(poll, headers={"Authorization": f"Bearer {MAGIC_HOUR_API_KEY}"}, timeout=30)
+                if rr.status_code != 200:
+                    continue
+                d = rr.json()
+                st = d.get("status")
+                if st == "complete":
+                    downloads = d.get("downloads", [])
+                    if downloads:
+                        return downloads[0].get("url"), None
+                    return None, "MagicHour no url"
+                if st == "error":
+                    return None, f"MagicHour: {d.get('error', 'unknown')}"
+            except:
+                continue
+        return None, "MagicHour timeout"
+    except Exception as e:
+        return None, f"MagicHour: {str(e)[:150]}"
+
+def generate_video(prompt, seconds=5):
+    url, err = generate_video_agnes(prompt, seconds)
+    if url:
+        return url, None, "Agnes AI"
+    print(f"Agnes failed: {err} - trying Magic Hour")
+    url, err = generate_video_magic(prompt, seconds)
+    if url:
+        return url, None, "Magic Hour"
+    return None, err, None
+
 # ============ الأزرار ============
 def get_after_reply_buttons():
     kb = types.InlineKeyboardMarkup(row_width=3)
@@ -128,12 +233,15 @@ def get_main_menu():
         types.InlineKeyboardButton("💬 شات", callback_data="menu_chat"),
     )
     kb.add(
+        types.InlineKeyboardButton("🎬 فيديو", callback_data="menu_video"),
         types.InlineKeyboardButton("🎲 نصيحة", callback_data="menu_quote"),
         types.InlineKeyboardButton("🌤️ الطقس", callback_data="menu_weather"),
         types.InlineKeyboardButton("📊 إحصائيات", callback_data="menu_stats"),
-        types.InlineKeyboardButton("❓ مساعدة", callback_data="menu_help"),
     )
-    kb.add(types.InlineKeyboardButton("🗑️ امسح الذاكرة", callback_data="menu_clear"))
+    kb.add(
+        types.InlineKeyboardButton("❓ مساعدة", callback_data="menu_help"),
+        types.InlineKeyboardButton("🗑️ امسح الذاكرة", callback_data="menu_clear"),
+    )
     return kb
 
 # ============ البحث ============
@@ -180,10 +288,8 @@ def chat_with_tools(uid, user_text, with_history=True):
 
     try:
         reply = client.chat.completions.create(
-            messages=msgs,
-            model="openai/gpt-oss-120b",
-            tools=TOOLS,
-            tool_choice="auto"
+            messages=msgs, model="openai/gpt-oss-120b",
+            tools=TOOLS, tool_choice="auto"
         )
         msg = reply.choices[0].message
     except Exception as e:
@@ -203,28 +309,21 @@ def chat_with_tools(uid, user_text, with_history=True):
             "role": "assistant",
             "content": msg.content or "",
             "tool_calls": [{
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments
-                }
+                "id": tc.id, "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
             }]
         })
         msgs.append({"role": "tool", "tool_call_id": tc.id, "content": res})
 
         try:
             summary_msgs = [
-                {"role": "system", "content": "أنت مساعد ذكي. جاوب على سؤال المستخدم بناء على نتائج البحث. جاوب بالعربية، بشكل واضح ومفيد."},
-                {"role": "user", "content": f"السؤال: {user_text}\n\nنتائج البحث:\n{res}\n\nجاوب على السؤال بناء على هالنتائج."}
+                {"role": "system", "content": "أنت مساعد ذكي. جاوب على سؤال المستخدم بناء على نتائج البحث. جاوب بالعربية."},
+                {"role": "user", "content": f"السؤال: {user_text}\n\nنتائج البحث:\n{res}\n\nجاوب."}
             ]
-            reply2 = client.chat.completions.create(
-                messages=summary_msgs,
-                model="openai/gpt-oss-120b"
-            )
-            answer = reply2.choices[0].message.content
+            r2 = client.chat.completions.create(messages=summary_msgs, model="openai/gpt-oss-120b")
+            answer = r2.choices[0].message.content
         except Exception as e:
-            answer = f"لقيت النتائج بصح ما قدرتش نلخّصها. عاود جرّب. ({str(e)[:100]})"
+            answer = f"لقيت النتائج بصح ما قدرتش نلخّصها. ({str(e)[:100]})"
     else:
         answer = msg.content
 
@@ -234,13 +333,14 @@ def chat_with_tools(uid, user_text, with_history=True):
     if with_history:
         msgs.append({"role": "assistant", "content": answer})
         save_history(uid, msgs)
-
     return answer
 
 def transcribe(audio_bytes):
     r = client.audio.transcriptions.create(
         file=("voice.ogg", audio_bytes),
         model="whisper-large-v3-turbo",
+        language="ar",
+        prompt="هذا تسجيل بالدارجة التونسية."
     )
     return r.text
 
@@ -249,7 +349,8 @@ def transcribe(audio_bytes):
 def cmd_start(m):
     txt = ("أهلاً! 👋\n\nأنا مساعدك الذكي:\n"
            "💬 كتابة | 🎤 صوت | 🖼️ صور | 📄 PDF\n"
-           "🔍 بحث | 🌐 ترجمة | 📝 تلخيص | 💡 أفكار\n\n"
+           "🔍 بحث | 🌐 ترجمة | 📝 تلخيص\n"
+           "🎬 توليد فيديو بالذكاء الاصطناعي!\n\n"
            "اكتب /menu باش تشوف كل شيء!")
     bot.reply_to(m, txt, reply_markup=get_main_menu())
 
@@ -258,9 +359,9 @@ def cmd_help(m):
     txt = ("🤖 الأوامر:\n"
            "/start - بداية\n"
            "/menu - القائمة\n"
+           "/video - توليد فيديو\n"
            "/help - المساعدة\n"
-           "/clear - امسح الذاكرة\n"
-           "/stats - إحصائيات")
+           "/clear - امسح الذاكرة")
     bot.reply_to(m, txt)
 
 @bot.message_handler(commands=['menu'])
@@ -274,22 +375,33 @@ def cmd_clear(m):
         os.remove(hfile(uid))
     bot.reply_to(m, "✅ الذاكرة تمسحت.")
 
-@bot.message_handler(commands=['stats'])
-def cmd_stats(m):
-    uid = m.chat.id
-    if os.path.exists(hfile(uid)):
-        with open(hfile(uid), "r", encoding="utf-8") as f:
-            msgs = json.load(f)
-        total = len(msgs)
-        user_msgs = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "user")
-        bot_msgs = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "assistant")
-        txt = (f"📊 إحصائياتك:\n\n"
-               f"💬 مجموع الرسائل: {total}\n"
-               f"👤 رسائلك: {user_msgs}\n"
-               f"🤖 ردود البوت: {bot_msgs}")
+@bot.message_handler(commands=['video'])
+def cmd_video(m):
+    msg = bot.reply_to(m, "🎬 اكتبلي وصف الفيديو (بالإنجليزية يخدم أحسن):\n\nمثال: A cat playing in a garden, sunny day")
+    bot.register_next_step_handler(msg, process_video)
+
+def process_video(m):
+    prompt = m.text.strip() if m.text else ""
+    if not prompt:
+        bot.reply_to(m, "❌ ما كتبتش وصف.")
+        return
+    bot.send_chat_action(m.chat.id, 'upload_video')
+    wait = bot.reply_to(m, "⏳ نولّد الفيديو... ياخذ 1-3 دقائق. استنّى.")
+
+    url, err, provider = generate_video(prompt, seconds=5)
+
+    try:
+        bot.delete_message(m.chat.id, wait.message_id)
+    except:
+        pass
+
+    if url:
+        try:
+            bot.send_video(m.chat.id, url, caption=f"🎬 الفيديو جاهز!\n\n📝 {prompt}\n🔧 {provider}")
+        except Exception as e:
+            bot.send_message(m.chat.id, f"🎬 الفيديو جاهز بصح ما قدرتش نرسلو:\n{url}\n\n({str(e)[:100]})")
     else:
-        txt = "📊 ما عندك حتى محادثة محفوظة."
-    bot.reply_to(m, txt)
+        bot.send_message(m.chat.id, f"❌ ما قدرناش نولّدو الفيديو.\n\n{err}")
 
 # ============ الأزرار ============
 @bot.callback_query_handler(func=lambda call: True)
@@ -299,138 +411,129 @@ def handle_callback(call):
     bot.answer_callback_query(call.id)
 
     if data == "menu_main":
-        bot.send_message(uid, "🎯 القائمة الرئيسية:", reply_markup=get_main_menu())
-
+        bot.send_message(uid, "🎯 القائمة:", reply_markup=get_main_menu())
     elif data == "menu_help":
         cmd_help(call.message)
-
     elif data == "menu_clear":
         if os.path.exists(hfile(uid)):
             os.remove(hfile(uid))
         bot.send_message(uid, "✅ الذاكرة تمسحت.")
-
-    elif data == "menu_stats":
-        cmd_stats(call.message)
-
+    elif data == "menu_video":
+        msg = bot.send_message(uid, "🎬 اكتبلي وصف الفيديو (بالإنجليزية يخدم أحسن):")
+        bot.register_next_step_handler(msg, process_video)
     elif data == "menu_search":
         msg = bot.send_message(uid, "🔍 اكتب شنوّة تحب نبحث عليه:")
         bot.register_next_step_handler(msg, process_search)
-
     elif data == "menu_translate":
         msg = bot.send_message(uid, "🌐 اكتب النص (عربي↔إنجليزي):")
         bot.register_next_step_handler(msg, process_translate)
-
     elif data == "menu_summary":
         msg = bot.send_message(uid, "📝 ابعثلي النص:")
         bot.register_next_step_handler(msg, process_summary)
-
     elif data == "menu_ideas":
         msg = bot.send_message(uid, "💡 على شنوّة تحب أفكار؟")
         bot.register_next_step_handler(msg, process_ideas)
-
     elif data == "menu_write":
         msg = bot.send_message(uid, "✍️ اكتب شنوّة تحب نكتبلك:")
         bot.register_next_step_handler(msg, process_write)
-
     elif data == "menu_math":
         msg = bot.send_message(uid, "🔢 اكتب المسألة:")
         bot.register_next_step_handler(msg, process_math)
-
     elif data == "menu_explain":
-        msg = bot.send_message(uid, "📖 اكتب الحاجة اللي تحب نشرحها:")
+        msg = bot.send_message(uid, "📖 اكتب الحاجة:")
         bot.register_next_step_handler(msg, process_explain)
-
     elif data == "menu_chat":
-        bot.send_message(uid, "💬 تفضل، اكتبلي ونتكلمو 🙂")
-
+        bot.send_message(uid, "💬 تفضل 🙂")
     elif data == "menu_quote":
         quotes = [
             "💡 النجاح هو مجموع جهود صغيرة تتعاود كل يوم.",
             "💡 ما تخافش من البطء، خاف من الوقوف.",
             "💡 اللي يتعلّم من أخطائه، يربح.",
-            "💡 ابدا من وين راك، استعمل اللي عندك، اعمل اللي تقدر.",
+            "💡 ابدا من وين راك، استعمل اللي عندك.",
             "💡 الصبر مفتاح الفرج.",
-            "💡 أحسن وقت تزرع فيه شجرة كان 20 سنة قبل. ثاني أحسن وقت هو توّا.",
         ]
         bot.send_message(uid, random.choice(quotes))
-
     elif data == "menu_weather":
         msg = bot.send_message(uid, "🌤️ اكتب اسم المدينة:")
         bot.register_next_step_handler(msg, process_weather)
-
+    elif data == "menu_stats":
+        cmd_stats(call.message)
     elif data == "act_retry":
-        bot.send_message(uid, "🔄 اكتب سؤالك مرة أخرى.")
-
+        bot.send_message(uid, "🔄 اكتب سؤالك.")
     elif data == "act_summary":
         msg = bot.send_message(uid, "📝 ابعثلي النص:")
         bot.register_next_step_handler(msg, process_summary)
-
     elif data == "act_translate":
         msg = bot.send_message(uid, "🌐 اكتب النص:")
         bot.register_next_step_handler(msg, process_translate)
+
+@bot.message_handler(commands=['stats'])
+def cmd_stats(m):
+    uid = m.chat.id
+    if os.path.exists(hfile(uid)):
+        with open(hfile(uid), "r", encoding="utf-8") as f:
+            msgs = json.load(f)
+        total = len(msgs)
+        um = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "user")
+        bm = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "assistant")
+        bot.reply_to(m, f"📊 إحصائياتك:\n\n💬 المجموع: {total}\n👤 رسائلك: {um}\n🤖 ردود: {bm}")
+    else:
+        bot.reply_to(m, "📊 ما عندك حتى محادثة.")
 
 # ============ معالجات ============
 def process_search(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"ابحثلي في الإنترنت على: {m.text}")
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"ابحثلي على: {m.text}"))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
 def process_translate(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"ترجم هذا (عربي↔إنجليزي):\n\n{m.text}", with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"ترجم (عربي↔إنجليزي):\n\n{m.text}", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
 def process_summary(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"لخّصلي في نقاط:\n\n{m.text}", with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"لخّص في نقاط:\n\n{m.text}", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
 def process_ideas(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"عطيني 5 أفكار على: {m.text}", with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"عطيني 5 أفكار على: {m.text}", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
 def process_write(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"اكتبلي: {m.text}", with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"اكتبلي: {m.text}", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
 def process_math(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"حل المسألة: {m.text}\n\nوريني الخطوات.", with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"حل: {m.text}\nالخطوات.", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
 def process_explain(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"اشرحلي بطريقة بسيطة: {m.text}", with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"اشرحلي بسيط: {m.text}", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
 def process_weather(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, f"شنوّة الطقس في {m.text} توّا؟ ابحثلي في الإنترنت.", with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"الطقس في {m.text} توّا؟ ابحث.", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
@@ -442,9 +545,8 @@ def handle_voice(m):
         fi = bot.get_file(m.voice.file_id)
         audio = bot.download_file(fi.file_path)
         text = transcribe(audio)
-        bot.send_message(m.chat.id, f"🎤 سمعتك تقول: {text}")
-        answer = chat_with_tools(m.chat.id, text)
-        send_answer(m.chat.id, answer)
+        bot.send_message(m.chat.id, f"🎤 سمعتك: {text}")
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, text))
     except Exception as e:
         bot.reply_to(m, f"خطأ في الصوت: {str(e)[:200]}")
 
@@ -459,17 +561,13 @@ def handle_photo(m):
         fi = bot.get_file(m.photo[-1].file_id)
         img = bot.download_file(fi.file_path)
         b64 = base64.b64encode(img).decode()
-        caption = m.caption or "شنوّة في هذه الصورة؟ وصفلي بالتفصيل."
-
+        caption = m.caption or "شنوّة في هذه الصورة؟"
         response = openrouter_client.chat.completions.create(
             model="openrouter/free",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": caption},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]
-            }]
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": caption},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            ]}]
         )
         send_answer(m.chat.id, response.choices[0].message.content)
     except Exception as e:
@@ -483,23 +581,20 @@ def handle_doc(m):
         fi = bot.get_file(m.document.file_id)
         doc = bot.download_file(fi.file_path)
         name = (m.document.file_name or "").lower()
-
         if name.endswith(".pdf"):
             reader = PdfReader(io.BytesIO(doc))
             text = "\n".join((p.extract_text() or "") for p in reader.pages[:20])
             if not text.strip():
                 bot.reply_to(m, "ما قدرتش نقرا الـ PDF.")
                 return
-            prompt = f"هذا محتوى PDF، لخّصلي أهم النقاط:\n\n{text[:8000]}"
+            prompt = f"لخّصلي:\n\n{text[:8000]}"
         elif name.endswith((".txt", ".md", ".csv")):
             text = doc.decode("utf-8", errors="ignore")
-            prompt = f"هذا محتوى ملف، لخّصلي:\n\n{text[:8000]}"
+            prompt = f"لخّصلي:\n\n{text[:8000]}"
         else:
             bot.reply_to(m, "نوع الملف ما مدعومش.")
             return
-
-        answer = chat_with_tools(m.chat.id, prompt, with_history=False)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, prompt, with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ في الملف: {str(e)[:200]}")
 
@@ -510,8 +605,7 @@ def handle_text(m):
         return
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        answer = chat_with_tools(m.chat.id, m.text)
-        send_answer(m.chat.id, answer)
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, m.text))
     except Exception as e:
         bot.reply_to(m, f"حدث خطأ: {str(e)[:200]}")
 
