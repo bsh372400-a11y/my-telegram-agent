@@ -153,7 +153,7 @@ def generate_video_magic(prompt, seconds=5):
             "name": "Telegram Bot",
             "end_seconds": seconds,
             "aspect_ratio": "16:9",
-            "resolution": "720p",
+            "resolution": "480p",
             "style": {"prompt": prompt}
         }
         r = httpx.post(url, json=payload, headers=headers, timeout=60)
