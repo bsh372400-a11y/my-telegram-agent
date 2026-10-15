@@ -95,7 +95,7 @@ def save_history(uid, msgs):
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
 # ============ توليد الفيديو ============
-def generate_video_agnes(prompt, seconds=5):
+def generate_video_agnes(prompt, seconds=5, aspect_ratio="16:9"):
     if not AGNES_API_KEY:
         return None, "Agnes API key missing"
     try:
@@ -105,12 +105,12 @@ def generate_video_agnes(prompt, seconds=5):
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "agnes-video-2.5",
+            "model": "agnes-video-2.5-flash",
             "prompt": prompt,
             "seconds": str(seconds),
             "mode": "text",
             "size": "720P",
-            "aspect_ratio": "16:9"
+            "aspect_ratio": aspect_ratio
         }
         r = httpx.post(create_url, json=payload, headers=headers, timeout=60)
         if r.status_code != 200:
@@ -120,7 +120,7 @@ def generate_video_agnes(prompt, seconds=5):
         if not vid:
             return None, f"Agnes no id: {str(data)[:150]}"
 
-        poll = f"https://apihub.agnes-ai.com/agnesapi?video_id={vid}&model_name=agnes-video-2.5"
+        poll = f"https://apihub.agnes-ai.com/agnesapi?video_id={vid}&model_name=agnes-video-2.5-flash"
         for _ in range(60):
             time.sleep(3)
             try:
@@ -139,7 +139,7 @@ def generate_video_agnes(prompt, seconds=5):
     except Exception as e:
         return None, f"Agnes: {str(e)[:150]}"
 
-def generate_video_magic(prompt, seconds=5):
+def generate_video_magic(prompt, seconds=5, aspect_ratio="16:9"):
     if not MAGIC_HOUR_API_KEY:
         return None, "Magic Hour key missing"
     try:
@@ -152,7 +152,7 @@ def generate_video_magic(prompt, seconds=5):
         payload = {
             "name": "Telegram Bot",
             "end_seconds": seconds,
-            "aspect_ratio": "16:9",
+            "aspect_ratio": aspect_ratio,
             "resolution": "480p",
             "style": {"prompt": prompt}
         }
@@ -186,12 +186,12 @@ def generate_video_magic(prompt, seconds=5):
     except Exception as e:
         return None, f"MagicHour: {str(e)[:150]}"
 
-def generate_video(prompt, seconds=5):
-    url, err = generate_video_agnes(prompt, seconds)
+def generate_video(prompt, seconds=5, aspect_ratio="16:9"):
+    url, err = generate_video_agnes(prompt, seconds, aspect_ratio)
     if url:
         return url, None, "Agnes AI"
     print(f"Agnes failed: {err} - trying Magic Hour")
-    url, err = generate_video_magic(prompt, seconds)
+    url, err = generate_video_magic(prompt, seconds, aspect_ratio)
     if url:
         return url, None, "Magic Hour"
     return None, err, None
@@ -297,7 +297,6 @@ def chat_with_tools(uid, user_text, with_history=True):
 
     if msg.tool_calls:
         tc = msg.tool_calls[0]
-        # حماية: إذا الأداة ماهيش search_web، تجاهلها
         if tc.function.name != "search_web":
             answer = msg.content or "سمعتك، بصح ما فهمتش. عاود صياغة."
             if with_history:
@@ -384,31 +383,47 @@ def cmd_clear(m):
 
 @bot.message_handler(commands=['video'])
 def cmd_video(m):
-    msg = bot.reply_to(m, "🎬 اكتبلي وصف الفيديو (بالإنجليزية يخدم أحسن):\n\nمثال: A cat playing in a garden, sunny day")
-    bot.register_next_step_handler(msg, process_video)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("📱 عمودي (9:16)", callback_data="vid_v_9_16"),
+        types.InlineKeyboardButton("🖥️ أفقي (16:9)", callback_data="vid_v_16_9"),
+        types.InlineKeyboardButton("⬛ مربع (1:1)", callback_data="vid_v_1_1"),
+    )
+    bot.reply_to(m, "🎬 اختار مقاس الفيديو:", reply_markup=kb)
 
-def process_video(m):
+@bot.message_handler(commands=['stats'])
+def cmd_stats(m):
+    uid = m.chat.id
+    if os.path.exists(hfile(uid)):
+        with open(hfile(uid), "r", encoding="utf-8") as f:
+            msgs = json.load(f)
+        total = len(msgs)
+        um = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "user")
+        bm = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "assistant")
+        bot.reply_to(m, f"📊 إحصائياتك:\n\n💬 المجموع: {total}\n👤 رسائلك: {um}\n🤖 ردود: {bm}")
+    else:
+        bot.reply_to(m, "📊 ما عندك حتى محادثة.")
+
+# ============ معالج فيديو ============
+def process_video_format(m, aspect_ratio):
     prompt = m.text.strip() if m.text else ""
     if not prompt:
         bot.reply_to(m, "❌ ما كتبتش وصف.")
         return
     bot.send_chat_action(m.chat.id, 'upload_video')
-    wait = bot.reply_to(m, "⏳ نولّد الفيديو... ياخذ 1-3 دقائق. استنّى.")
-
-    url, err, provider = generate_video(prompt, seconds=5)
-
+    wait = bot.reply_to(m, f"⏳ نولّد الفيديو ({aspect_ratio})... ياخذ 1-3 دقائق.")
+    url, err, provider = generate_video(prompt, seconds=5, aspect_ratio=aspect_ratio)
     try:
         bot.delete_message(m.chat.id, wait.message_id)
     except:
         pass
-
     if url:
         try:
-            bot.send_video(m.chat.id, url, caption=f"🎬 الفيديو جاهز!\n\n📝 {prompt}\n🔧 {provider}")
+            bot.send_video(m.chat.id, url, caption=f"🎬 جاهز!\n📝 {prompt}\n📐 {aspect_ratio}\n🔧 {provider}")
         except Exception as e:
-            bot.send_message(m.chat.id, f"🎬 الفيديو جاهز بصح ما قدرتش نرسلو:\n{url}\n\n({str(e)[:100]})")
+            bot.send_message(m.chat.id, f"🎬 الفيديو:\n{url}\n\n({str(e)[:100]})")
     else:
-        bot.send_message(m.chat.id, f"❌ ما قدرناش نولّدو الفيديو.\n\n{err}")
+        bot.send_message(m.chat.id, f"❌ فشل.\n\n{err}")
 
 # ============ الأزرار ============
 @bot.callback_query_handler(func=lambda call: True)
@@ -417,7 +432,12 @@ def handle_callback(call):
     data = call.data
     bot.answer_callback_query(call.id)
 
-    if data == "menu_main":
+    if data.startswith("vid_v_"):
+        ar_map = {"vid_v_9_16": "9:16", "vid_v_16_9": "16:9", "vid_v_1_1": "1:1"}
+        ar = ar_map.get(data, "16:9")
+        msg = bot.send_message(uid, f"🎬 مقاس {ar}. اكتبلي وصف الفيديو (بالإنجليزية):")
+        bot.register_next_step_handler(msg, process_video_format, ar)
+    elif data == "menu_main":
         bot.send_message(uid, "🎯 القائمة:", reply_markup=get_main_menu())
     elif data == "menu_help":
         cmd_help(call.message)
@@ -426,8 +446,13 @@ def handle_callback(call):
             os.remove(hfile(uid))
         bot.send_message(uid, "✅ الذاكرة تمسحت.")
     elif data == "menu_video":
-        msg = bot.send_message(uid, "🎬 اكتبلي وصف الفيديو (بالإنجليزية يخدم أحسن):")
-        bot.register_next_step_handler(msg, process_video)
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("📱 عمودي (9:16)", callback_data="vid_v_9_16"),
+            types.InlineKeyboardButton("🖥️ أفقي (16:9)", callback_data="vid_v_16_9"),
+            types.InlineKeyboardButton("⬛ مربع (1:1)", callback_data="vid_v_1_1"),
+        )
+        bot.send_message(uid, "🎬 اختار مقاس الفيديو:", reply_markup=kb)
     elif data == "menu_search":
         msg = bot.send_message(uid, "🔍 اكتب شنوّة تحب نبحث عليه:")
         bot.register_next_step_handler(msg, process_search)
@@ -474,19 +499,6 @@ def handle_callback(call):
         msg = bot.send_message(uid, "🌐 اكتب النص:")
         bot.register_next_step_handler(msg, process_translate)
 
-@bot.message_handler(commands=['stats'])
-def cmd_stats(m):
-    uid = m.chat.id
-    if os.path.exists(hfile(uid)):
-        with open(hfile(uid), "r", encoding="utf-8") as f:
-            msgs = json.load(f)
-        total = len(msgs)
-        um = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "user")
-        bm = sum(1 for x in msgs if isinstance(x, dict) and x.get("role") == "assistant")
-        bot.reply_to(m, f"📊 إحصائياتك:\n\n💬 المجموع: {total}\n👤 رسائلك: {um}\n🤖 ردود: {bm}")
-    else:
-        bot.reply_to(m, "📊 ما عندك حتى محادثة.")
-
 # ============ معالجات ============
 def process_search(m):
     try:
@@ -526,99 +538,4 @@ def process_write(m):
 def process_math(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"حل: {m.text}\nالخطوات.", with_history=False))
-    except Exception as e:
-        bot.reply_to(m, f"خطأ: {str(e)[:200]}")
-
-def process_explain(m):
-    try:
-        bot.send_chat_action(m.chat.id, 'typing')
-        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"اشرحلي بسيط: {m.text}", with_history=False))
-    except Exception as e:
-        bot.reply_to(m, f"خطأ: {str(e)[:200]}")
-
-def process_weather(m):
-    try:
-        bot.send_chat_action(m.chat.id, 'typing')
-        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"الطقس في {m.text} توّا؟ ابحث.", with_history=False))
-    except Exception as e:
-        bot.reply_to(m, f"خطأ: {str(e)[:200]}")
-
-# ============ Voice ============
-@bot.message_handler(content_types=['voice'])
-def handle_voice(m):
-    try:
-        bot.send_chat_action(m.chat.id, 'typing')
-        fi = bot.get_file(m.voice.file_id)
-        audio = bot.download_file(fi.file_path)
-        text = transcribe(audio)
-        bot.send_message(m.chat.id, f"🎤 سمعتك: {text}")
-        send_answer(m.chat.id, chat_with_tools(m.chat.id, text))
-    except Exception as e:
-        bot.reply_to(m, f"خطأ في الصوت: {str(e)[:200]}")
-
-# ============ Photo ============
-@bot.message_handler(content_types=['photo'])
-def handle_photo(m):
-    if not openrouter_client:
-        bot.reply_to(m, "ميزة الصور غير مفعلة.")
-        return
-    try:
-        bot.send_chat_action(m.chat.id, 'typing')
-        fi = bot.get_file(m.photo[-1].file_id)
-        img = bot.download_file(fi.file_path)
-        b64 = base64.b64encode(img).decode()
-        caption = m.caption or "شنوّة في هذه الصورة؟"
-        response = openrouter_client.chat.completions.create(
-            model="openrouter/free",
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": caption},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-            ]}]
-        )
-        send_answer(m.chat.id, response.choices[0].message.content)
-    except Exception as e:
-        bot.reply_to(m, f"خطأ في الصورة: {str(e)[:200]}")
-
-# ============ Document ============
-@bot.message_handler(content_types=['document'])
-def handle_doc(m):
-    try:
-        bot.send_chat_action(m.chat.id, 'typing')
-        fi = bot.get_file(m.document.file_id)
-        doc = bot.download_file(fi.file_path)
-        name = (m.document.file_name or "").lower()
-        if name.endswith(".pdf"):
-            reader = PdfReader(io.BytesIO(doc))
-            text = "\n".join((p.extract_text() or "") for p in reader.pages[:20])
-            if not text.strip():
-                bot.reply_to(m, "ما قدرتش نقرا الـ PDF.")
-                return
-            prompt = f"لخّصلي:\n\n{text[:8000]}"
-        elif name.endswith((".txt", ".md", ".csv")):
-            text = doc.decode("utf-8", errors="ignore")
-            prompt = f"لخّصلي:\n\n{text[:8000]}"
-        else:
-            bot.reply_to(m, "نوع الملف ما مدعومش.")
-            return
-        send_answer(m.chat.id, chat_with_tools(m.chat.id, prompt, with_history=False))
-    except Exception as e:
-        bot.reply_to(m, f"خطأ في الملف: {str(e)[:200]}")
-
-# ============ Text ============
-@bot.message_handler(func=lambda m: True)
-def handle_text(m):
-    if not m.text:
-        return
-    try:
-        bot.send_chat_action(m.chat.id, 'typing')
-        send_answer(m.chat.id, chat_with_tools(m.chat.id, m.text))
-    except Exception as e:
-        bot.reply_to(m, f"حدث خطأ: {str(e)[:200]}")
-
-if __name__ == "__main__":
-    t = threading.Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-    print("Bot running...")
-    bot.infinity_polling()
+        send_answer(m.chat.id, chat_with
