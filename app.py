@@ -19,7 +19,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 AGNES_API_KEY = os.environ.get("AGNES_API_KEY")
-MAGIC_HOUR_API_KEY = os.environ.get("MAGIC_HOUR_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     print("Error: missing tokens")
@@ -94,7 +93,7 @@ def save_history(uid, msgs):
     with open(hfile(uid), "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
-# ============ توليد الفيديو ============
+# ============ توليد الفيديو (Agnes v2.0 مجاني) ============
 def generate_video_agnes(prompt, seconds=5, aspect_ratio="16:9"):
     if not AGNES_API_KEY:
         return None, "Agnes API key missing"
@@ -104,110 +103,64 @@ def generate_video_agnes(prompt, seconds=5, aspect_ratio="16:9"):
         "Content-Type": "application/json"
     }
     
-    models = ["agnes-video-2.5-flash", "agnes-video-v2.0"]
+    model = "agnes-video-v2.0"
     
-    for model in models:
-        try:
-            create_url = "https://apihub.agnes-ai.com/v1/videos"
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "seconds": str(seconds),
-                "mode": "text",
-                "size": "720P",
-                "aspect_ratio": aspect_ratio
-            }
-            r = httpx.post(create_url, json=payload, headers=headers, timeout=60)
-            
-            if r.status_code == 503:
-                print(f"{model}: queue full, trying next")
-                continue
-            
-            if r.status_code != 200:
-                print(f"{model}: {r.text[:150]}")
-                continue
-            
-            data = r.json()
-            vid = data.get("video_id")
-            if not vid:
-                continue
-            
-            poll = f"https://apihub.agnes-ai.com/agnesapi?video_id={vid}&model_name={model}"
-            for _ in range(60):
-                time.sleep(3)
-                try:
-                    rr = httpx.get(poll, headers={"Authorization": f"Bearer {AGNES_API_KEY}"}, timeout=30)
-                    if rr.status_code != 200:
-                        continue
-                    d = rr.json()
-                    st = d.get("status")
-                    if st == "completed":
-                        return d.get("url"), None
-                    if st == "failed":
-                        break
-                except:
-                    continue
-        except Exception as e:
-            print(f"{model}: {str(e)[:100]}")
-            continue
-    
-    return None, "Agnes: كل الموديلات فشلت (طابور ممتلئ)"
-
-def generate_video_magic(prompt, seconds=5, aspect_ratio="16:9"):
-    if not MAGIC_HOUR_API_KEY:
-        return None, "Magic Hour key missing"
     try:
-        url = "https://api.magichour.ai/v1/text-to-video"
-        headers = {
-            "Authorization": f"Bearer {MAGIC_HOUR_API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
+        create_url = "https://apihub.agnes-ai.com/v1/videos"
         payload = {
-            "name": "Telegram Bot",
-            "end_seconds": seconds,
-            "aspect_ratio": aspect_ratio,
-            "resolution": "480p",
-            "style": {"prompt": prompt}
+            "model": model,
+            "prompt": prompt,
+            "seconds": str(seconds),
+            "mode": "text",
+            "size": "1080P",
+            "aspect_ratio": aspect_ratio
         }
-        r = httpx.post(url, json=payload, headers=headers, timeout=60)
+        r = httpx.post(create_url, json=payload, headers=headers, timeout=60)
+        
+        if r.status_code == 429:
+            return None, "طابور ممتلئ، عاود جرّب بعد دقيقة"
+        
         if r.status_code != 200:
-            return None, f"MagicHour create: {r.text[:150]}"
+            return None, f"Agnes create: {r.text[:150]}"
+        
         data = r.json()
-        job = data.get("id")
-        if not job:
-            return None, f"MagicHour no id: {str(data)[:150]}"
-
-        poll = f"https://api.magichour.ai/v1/video-projects/{job}"
+        vid = data.get("video_id")
+        if not vid:
+            return None, f"Agnes no id: {str(data)[:150]}"
+        
+        poll = f"https://apihub.agnes-ai.com/agnesapi?video_id={vid}&model_name={model}"
         for _ in range(80):
             time.sleep(3)
             try:
-                rr = httpx.get(poll, headers={"Authorization": f"Bearer {MAGIC_HOUR_API_KEY}"}, timeout=30)
+                rr = httpx.get(poll, headers={"Authorization": f"Bearer {AGNES_API_KEY}"}, timeout=30)
                 if rr.status_code != 200:
                     continue
                 d = rr.json()
                 st = d.get("status")
-                if st == "complete":
-                    downloads = d.get("downloads", [])
-                    if downloads:
-                        return downloads[0].get("url"), None
-                    return None, "MagicHour no url"
-                if st == "error":
-                    return None, f"MagicHour: {d.get('error', 'unknown')}"
+                if st == "completed":
+                    return d.get("url"), None
+                if st == "failed":
+                    return None, f"Agnes failed: {d.get('error', 'unknown')}"
             except:
                 continue
-        return None, "MagicHour timeout"
+        return None, "Agnes timeout"
     except Exception as e:
-        return None, f"MagicHour: {str(e)[:150]}"
+        return None, f"Agnes: {str(e)[:150]}"
 
 def generate_video(prompt, seconds=5, aspect_ratio="16:9"):
+    # محاولة 1
     url, err = generate_video_agnes(prompt, seconds, aspect_ratio)
     if url:
-        return url, None, "Agnes AI"
-    print(f"Agnes failed: {err} - trying Magic Hour")
-    url, err = generate_video_magic(prompt, seconds, aspect_ratio)
+        return url, None, "Agnes v2.0"
+    
+    print(f"Agnes failed: {err} - retrying in 60s...")
+    
+    # محاولة 2 بعد دقيقة (بسبب RPM=1)
+    time.sleep(60)
+    url, err = generate_video_agnes(prompt, seconds, aspect_ratio)
     if url:
-        return url, None, "Magic Hour"
+        return url, None, "Agnes v2.0 (retry)"
+    
     return None, err, None
 
 # ============ الأزرار ============
