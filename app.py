@@ -98,46 +98,60 @@ def save_history(uid, msgs):
 def generate_video_agnes(prompt, seconds=5, aspect_ratio="16:9"):
     if not AGNES_API_KEY:
         return None, "Agnes API key missing"
-    try:
-        create_url = "https://apihub.agnes-ai.com/v1/videos"
-        headers = {
-            "Authorization": f"Bearer {AGNES_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "agnes-video-2.5-flash",
-            "prompt": prompt,
-            "seconds": str(seconds),
-            "mode": "text",
-            "size": "720P",
-            "aspect_ratio": aspect_ratio
-        }
-        r = httpx.post(create_url, json=payload, headers=headers, timeout=60)
-        if r.status_code != 200:
-            return None, f"Agnes create: {r.text[:150]}"
-        data = r.json()
-        vid = data.get("video_id")
-        if not vid:
-            return None, f"Agnes no id: {str(data)[:150]}"
-
-        poll = f"https://apihub.agnes-ai.com/agnesapi?video_id={vid}&model_name=agnes-video-2.5-flash"
-        for _ in range(60):
-            time.sleep(3)
-            try:
-                rr = httpx.get(poll, headers={"Authorization": f"Bearer {AGNES_API_KEY}"}, timeout=30)
-                if rr.status_code != 200:
-                    continue
-                d = rr.json()
-                st = d.get("status")
-                if st == "completed":
-                    return d.get("url"), None
-                if st == "failed":
-                    return None, f"Agnes failed: {d.get('error', 'unknown')}"
-            except:
+    
+    headers = {
+        "Authorization": f"Bearer {AGNES_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    models = ["agnes-video-2.5-flash", "agnes-video-v2.0"]
+    
+    for model in models:
+        try:
+            create_url = "https://apihub.agnes-ai.com/v1/videos"
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "seconds": str(seconds),
+                "mode": "text",
+                "size": "720P",
+                "aspect_ratio": aspect_ratio
+            }
+            r = httpx.post(create_url, json=payload, headers=headers, timeout=60)
+            
+            if r.status_code == 503:
+                print(f"{model}: queue full, trying next")
                 continue
-        return None, "Agnes timeout"
-    except Exception as e:
-        return None, f"Agnes: {str(e)[:150]}"
+            
+            if r.status_code != 200:
+                print(f"{model}: {r.text[:150]}")
+                continue
+            
+            data = r.json()
+            vid = data.get("video_id")
+            if not vid:
+                continue
+            
+            poll = f"https://apihub.agnes-ai.com/agnesapi?video_id={vid}&model_name={model}"
+            for _ in range(60):
+                time.sleep(3)
+                try:
+                    rr = httpx.get(poll, headers={"Authorization": f"Bearer {AGNES_API_KEY}"}, timeout=30)
+                    if rr.status_code != 200:
+                        continue
+                    d = rr.json()
+                    st = d.get("status")
+                    if st == "completed":
+                        return d.get("url"), None
+                    if st == "failed":
+                        break
+                except:
+                    continue
+        except Exception as e:
+            print(f"{model}: {str(e)[:100]}")
+            continue
+    
+    return None, "Agnes: كل الموديلات فشلت (طابور ممتلئ)"
 
 def generate_video_magic(prompt, seconds=5, aspect_ratio="16:9"):
     if not MAGIC_HOUR_API_KEY:
@@ -538,4 +552,99 @@ def process_write(m):
 def process_math(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
-        send_answer(m.chat.id, chat_with
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"حل: {m.text}\nالخطوات.", with_history=False))
+    except Exception as e:
+        bot.reply_to(m, f"خطأ: {str(e)[:200]}")
+
+def process_explain(m):
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"اشرحلي بسيط: {m.text}", with_history=False))
+    except Exception as e:
+        bot.reply_to(m, f"خطأ: {str(e)[:200]}")
+
+def process_weather(m):
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"الطقس في {m.text} توّا؟ ابحث.", with_history=False))
+    except Exception as e:
+        bot.reply_to(m, f"خطأ: {str(e)[:200]}")
+
+# ============ Voice ============
+@bot.message_handler(content_types=['voice'])
+def handle_voice(m):
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        fi = bot.get_file(m.voice.file_id)
+        audio = bot.download_file(fi.file_path)
+        text = transcribe(audio)
+        bot.send_message(m.chat.id, f"🎤 سمعتك: {text}")
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, text))
+    except Exception as e:
+        bot.reply_to(m, f"خطأ في الصوت: {str(e)[:200]}")
+
+# ============ Photo ============
+@bot.message_handler(content_types=['photo'])
+def handle_photo(m):
+    if not openrouter_client:
+        bot.reply_to(m, "ميزة الصور غير مفعلة.")
+        return
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        fi = bot.get_file(m.photo[-1].file_id)
+        img = bot.download_file(fi.file_path)
+        b64 = base64.b64encode(img).decode()
+        caption = m.caption or "شنوّة في هذه الصورة؟"
+        response = openrouter_client.chat.completions.create(
+            model="openrouter/free",
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": caption},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            ]}]
+        )
+        send_answer(m.chat.id, response.choices[0].message.content)
+    except Exception as e:
+        bot.reply_to(m, f"خطأ في الصورة: {str(e)[:200]}")
+
+# ============ Document ============
+@bot.message_handler(content_types=['document'])
+def handle_doc(m):
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        fi = bot.get_file(m.document.file_id)
+        doc = bot.download_file(fi.file_path)
+        name = (m.document.file_name or "").lower()
+        if name.endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(doc))
+            text = "\n".join((p.extract_text() or "") for p in reader.pages[:20])
+            if not text.strip():
+                bot.reply_to(m, "ما قدرتش نقرا الـ PDF.")
+                return
+            prompt = f"لخّصلي:\n\n{text[:8000]}"
+        elif name.endswith((".txt", ".md", ".csv")):
+            text = doc.decode("utf-8", errors="ignore")
+            prompt = f"لخّصلي:\n\n{text[:8000]}"
+        else:
+            bot.reply_to(m, "نوع الملف ما مدعومش.")
+            return
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, prompt, with_history=False))
+    except Exception as e:
+        bot.reply_to(m, f"خطأ في الملف: {str(e)[:200]}")
+
+# ============ Text ============
+@bot.message_handler(func=lambda m: True)
+def handle_text(m):
+    if not m.text:
+        return
+    try:
+        bot.send_chat_action(m.chat.id, 'typing')
+        send_answer(m.chat.id, chat_with_tools(m.chat.id, m.text))
+    except Exception as e:
+        bot.reply_to(m, f"حدث خطأ: {str(e)[:200]}")
+
+if __name__ == "__main__":
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+    print("Bot running...")
+    bot.infinity_polling()
