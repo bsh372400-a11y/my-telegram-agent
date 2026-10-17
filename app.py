@@ -4,6 +4,8 @@ import json
 import base64
 import threading
 import random
+import re
+import urllib.parse
 from flask import Flask
 from groq import Groq
 import httpx
@@ -13,6 +15,7 @@ import telebot
 from telebot import types
 from pypdf import PdfReader
 from openai import OpenAI
+from youtube_transcript_api import YouTubeTranscriptApi
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -120,12 +123,15 @@ def get_main_menu():
     kb.add(
         types.InlineKeyboardButton("🔍 ابحث", callback_data="menu_search"),
         types.InlineKeyboardButton("🌐 ترجم", callback_data="menu_translate"),
-        types.InlineKeyboardButton("📝 لخّص", callback_data="menu_summary"),
+        types.InlineKeyboardButton("📝 لخّص نص", callback_data="menu_summary"),
         types.InlineKeyboardButton("💡 أفكار", callback_data="menu_ideas"),
         types.InlineKeyboardButton("✍️ اكتب", callback_data="menu_write"),
         types.InlineKeyboardButton("🔢 احسب", callback_data="menu_math"),
-        types.InlineKeyboardButton("📖 اشرحلي", callback_data="menu_explain"),
-        types.InlineKeyboardButton("💬 شات", callback_data="menu_chat"),
+    )
+    kb.add(
+        types.InlineKeyboardButton("📺 لخّص يوتيوب", callback_data="menu_youtube"),
+        types.InlineKeyboardButton("🖼️ ولّد صورة", callback_data="menu_image"),
+        types.InlineKeyboardButton("🔗 لخّص مقال", callback_data="menu_article"),
     )
     kb.add(
         types.InlineKeyboardButton("🎲 نصيحة", callback_data="menu_quote"),
@@ -247,7 +253,7 @@ def transcribe(audio_bytes):
 def cmd_start(m):
     txt = ("أهلاً! 👋\n\nأنا مساعدك الذكي:\n"
            "💬 كتابة | 🎤 صوت | 🖼️ صور | 📄 PDF\n"
-           "🔍 بحث | 🌐 ترجمة | 📝 تلخيص\n\n"
+           "📺 يوتيوب | 🔗 مقالات | 🎨 توليد صور\n\n"
            "اكتب /menu باش تشوف كل شيء!")
     bot.reply_to(m, txt, reply_markup=get_main_menu())
 
@@ -317,9 +323,15 @@ def handle_callback(call):
     elif data == "menu_math":
         msg = bot.send_message(uid, "🔢 اكتب المسألة:")
         bot.register_next_step_handler(msg, process_math)
-    elif data == "menu_explain":
-        msg = bot.send_message(uid, "📖 اكتب الحاجة:")
-        bot.register_next_step_handler(msg, process_explain)
+    elif data == "menu_youtube":
+        msg = bot.send_message(uid, "📺 ابعثلي رابط فيديو يوتيوب:")
+        bot.register_next_step_handler(msg, process_youtube)
+    elif data == "menu_image":
+        msg = bot.send_message(uid, "🖼️ اكتبلي وصف الصورة (بالإنجليزية يخدم أحسن):")
+        bot.register_next_step_handler(msg, process_image_gen)
+    elif data == "menu_article":
+        msg = bot.send_message(uid, "🔗 ابعثلي رابط المقال:")
+        bot.register_next_step_handler(msg, process_article)
     elif data == "menu_chat":
         bot.send_message(uid, "💬 تفضل 🙂")
     elif data == "menu_quote":
@@ -388,19 +400,87 @@ def process_math(m):
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
 
-def process_explain(m):
-    try:
-        bot.send_chat_action(m.chat.id, 'typing')
-        send_answer(m.chat.id, chat_with_tools(m.chat.id, f"اشرحلي بسيط: {m.text}", with_history=False))
-    except Exception as e:
-        bot.reply_to(m, f"خطأ: {str(e)[:200]}")
-
 def process_weather(m):
     try:
         bot.send_chat_action(m.chat.id, 'typing')
         send_answer(m.chat.id, chat_with_tools(m.chat.id, f"الطقس في {m.text} توّا؟ ابحث.", with_history=False))
     except Exception as e:
         bot.reply_to(m, f"خطأ: {str(e)[:200]}")
+
+# ============ الميزات الجديدة ============
+def process_youtube(m):
+    url = m.text.strip()
+    video_id = None
+    if "v=" in url:
+        video_id = url.split("v=")[1].split("&")[0]
+    elif "youtu.be/" in url:
+        video_id = url.split("youtu.be/")[1].split("?")[0]
+    
+    if not video_id:
+        bot.reply_to(m, "❌ رابط غالط. ابعثلي رابط يوتيوب صحيح.")
+        return
+    
+    wait = bot.reply_to(m, "⏳ نقرا الفيديو... استنّى شوية.")
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['ar', 'en', 'fr'])
+        text = " ".join([t['text'] for t in transcript])
+        if not text.strip():
+            bot.edit_message_text("❌ ما لقيتش نص في الفيديو هذا.", m.chat.id, wait.message_id)
+            return
+        
+        prompt = f"لخّصلي هذا النص من فيديو يوتيوب في نقاط واضحة بالعربية:\n\n{text[:10000]}"
+        answer = chat_with_tools(m.chat.id, prompt, with_history=False)
+        
+        bot.delete_message(m.chat.id, wait.message_id)
+        send_answer(m.chat.id, f"📺 **ملخص الفيديو:**\n\n{answer}")
+    except Exception as e:
+        bot.edit_message_text(f"❌ خطأ: ما لقيناش الترجمة متاع الفيديو هذا.\n(يمكن الفيديو ما فيهوش ترجمة مفعّلة).", m.chat.id, wait.message_id)
+
+def process_image_gen(m):
+    prompt = m.text.strip()
+    if not prompt:
+        bot.reply_to(m, "❌ ما كتبتش وصف.")
+        return
+    
+    wait = bot.reply_to(m, "🎨 نرسملك الصورة... استنّى شوية.")
+    try:
+        encoded_prompt = urllib.parse.quote(prompt)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        
+        bot.delete_message(m.chat.id, wait.message_id)
+        bot.send_photo(m.chat.id, image_url, caption=f"🖼️ **الصورة متاعك:**\n📝 {prompt}", reply_markup=get_after_reply_buttons())
+    except Exception as e:
+        bot.edit_message_text(f"❌ ما قدرناش نرسمو الصورة. عاود جرّب.", m.chat.id, wait.message_id)
+
+def process_article(m):
+    url = m.text.strip()
+    if not url.startswith("http"):
+        bot.reply_to(m, "❌ ابعثلي رابط صحيح يبدا بـ http.")
+        return
+    
+    wait = bot.reply_to(m, "⏳ نقرا المقال... استنّى شوية.")
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = httpx.get(url, headers=headers, timeout=20, follow_redirects=True)
+        soup = BeautifulSoup(r.text, "html.parser")
+        
+        for s in soup(["script", "style", "nav", "footer", "header"]):
+            s.decompose()
+        
+        text = soup.get_text(separator=" ", strip=True)
+        text = re.sub(r'\s+', ' ', text)
+        
+        if len(text) < 100:
+            bot.edit_message_text("❌ ما لقيتش نص كافي في الرابط هذا.", m.chat.id, wait.message_id)
+            return
+        
+        prompt = f"لخّصلي هذا المقال في نقاط واضحة بالعربية:\n\n{text[:10000]}"
+        answer = chat_with_tools(m.chat.id, prompt, with_history=False)
+        
+        bot.delete_message(m.chat.id, wait.message_id)
+        send_answer(m.chat.id, f"🔗 **ملخص المقال:**\n\n{answer}")
+    except Exception as e:
+        bot.edit_message_text(f"❌ خطأ في قراية المقال. تأكد من الرابط.", m.chat.id, wait.message_id)
 
 # ============ Voice ============
 @bot.message_handler(content_types=['voice'])
